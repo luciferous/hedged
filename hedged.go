@@ -1,22 +1,22 @@
 /*
-Package hedged manages hedged requests (sending the same request to multiple
-replicas and using the result from the first to respond). Refer to "The Tail at
+Package hedged manages hedged requests - sending the same request to multiple
+replicas and using the result from the first to respond. Refer to "The Tail at
 Scale" [1] for detail.
 
-To illustrate its usefulness, imagine you have a replica set that responds
-within 10ms on average, but takes occassionally (p99) 500ms, and even less
-frequently (p999) up to 1 second. Multiple factors (queues, GC, etc.) influence
-the response time of each server in the replica set, and so, while identical in
-operation, the same request may take longer depending on which server receives
-it.
+To illustrate: imagine you have a set of identical servers responding to
+various requests. Most of the time the servers respond quickly, but sometimes a
+response can be up to 100x slower than average. Multiple factors (e.g. queues,
+garbage collection) can account for the variability in the response time of
+each server.
 
-The hedged request is a strategy to curb this latency variability: issue the
-same request twice and use the first response. This naive method doubles the
-load sent to the servers. A better method is to wait between sending the
-requests, giving time to the first to complete.
+Hedged requests are a strategy to curb this latency variability: issue the same
+request twice and use the first response. The method employed here issues the
+second request only after passing a duration threshold supplied as a parameter.
 
-But how long do we wait for? A good starting point is the p95 latency. This
-translates into only a %5 increase in load sent to the servers.
+The idea is that if a server can respond fast enough, we can avoid sending a
+second request, duplicating work for little gain. Issuing a hedge request for
+only the slowest 5%, ensures the latency reduction is impactful, costing only a
+5% increase in duplicated work.
 
 Here's an example with sending a GET request to example.com.
 
@@ -46,15 +46,14 @@ import (
 
 // Request defines a cancellable request.
 //
-// Req may be called multiple times such that several Req may be running in
-// parallel. The first Req to finish cancels the others that are in flight.
-// Req, therefore, should be idempotent.
+// Req may be called multiple times such that several invocations of Req may be
+// running in parallel. The first Req to finish cancels the others that are in
+// flight. Req, therefore, should be idempotent.
 //
 // Via the supplied context, implementations may respond directly to
 // cancellation from the caller,
 //
 // 	func Req(ctx context.Context) (interface{}, error) {
-// 		// ...
 // 		select {
 // 		case <-ctx.Done():
 // 			// Canceled: do something else, clean up, etc...
@@ -74,7 +73,7 @@ type Request interface {
 	Req(context.Context) (interface{}, error)
 }
 
-// TaskFunc is an adapter to allow the use of ordinary functions as Tasks.
+// RequestFunc is an adapter to allow the use of ordinary functions as Requests.
 type RequestFunc func(context.Context) (interface{}, error)
 
 // Run calls f(ctx).
@@ -86,8 +85,8 @@ func (f RequestFunc) Req(ctx context.Context) (interface{}, error) {
 //
 // If the request doesn't complete within the wait time, another request is
 // sent as a backup. Whichever request completes first cancels the other.
-func Run(ctx context.Context, r Request, wait time.Duration) interface{} {
-	return RunN(ctx, r, wait, 1)
+func Run(ctx context.Context, wait time.Duration, r Request) interface{} {
+	return RunN(ctx, wait, 1, r)
 }
 
 // RunN is like Run but can send more than one hedge request.
@@ -95,7 +94,7 @@ func Run(ctx context.Context, r Request, wait time.Duration) interface{} {
 // The wait duration is the interval at which requests get sent, until one
 // completes, or there are n requests in flight. Whichever request completes
 // first cancels the rest.
-func RunN(ctx context.Context, r Request, wait time.Duration, n int) interface{} {
+func RunN(ctx context.Context, wait time.Duration, n int, r Request) interface{} {
 	var wg sync.WaitGroup
 	var v interface{}
 
